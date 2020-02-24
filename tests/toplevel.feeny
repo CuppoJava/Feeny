@@ -1,0 +1,7 @@
+var x = 10
+
+if x > 0 :
+  var y = 20
+  x = x + y
+
+printf("x is ~\n", x)

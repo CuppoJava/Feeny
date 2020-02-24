@@ -1,0 +1,152 @@
+defpackage feeny/parser :
+   import core
+   import collections
+   import feeny/ir
+   import reader
+
+defn* apply-suffix-ops<?T> (x:?T, fs:List<(T -> T)>) -> T :
+   if empty?(fs) : x
+   else : apply-suffix-ops(head(fs)(x), tail(fs))
+
+defn ParseException (info:FileInfo|False, msg) :
+   new Exception :
+      defmethod print (o:OutputStream, this) :
+         val info-str = ("%_: " % [info]) when info is-not False else ""
+         print(o, "%_%_" % [info-str, msg])
+
+defsyntax feeny :
+   defproduction emt : False
+   fail-if emt = (?x) : ParseException(closest-info(), "Unexpected token %_ found here." % [x])
+   defrule emt = () : false
+
+   defproduction sym: Symbol
+   defrule sym = (?x) when unwrap-token(x) is Symbol : unwrap-token(x)
+
+   defproduction int: Int
+   defrule int = (?x) when unwrap-token(x) is Int : unwrap-token(x)
+   
+   defproduction str: String
+   defrule str = (?x) when unwrap-token(x) is String : unwrap-token(x)
+
+   defproduction sym!: Symbol
+   defrule sym! = (?x:#sym) : x
+   fail-if sym! = () : ParseException(closest-info(), "Expected a symbol here.")
+
+   defproduction int!: Int
+   defrule int! = (?x:#int) : x
+   fail-if int! = () : ParseException(closest-info(), "Expected an integer here.")
+
+   defproduction str!: String
+   defrule str! = (?x:#str) : x
+   fail-if str! = () : ParseException(closest-info(), "Expected a string here.")
+
+   defproduction e0 : Exp
+   defproduction e1 : Exp
+   defproduction e2 : Exp
+   defproduction e3 : Exp
+   defrule e0 = (?x:#e1 ?ys:#op0 ...) : apply-suffix-ops(x, ys)
+   defrule e1 = (?x:#e2 ?ys:#op1 ...) : apply-suffix-ops(x, ys)
+   defrule e2 = (?x:#e3 ?ys:#op2 ...) : apply-suffix-ops(x, ys)
+   defrule e3 = (?x:#e4 ?ys:#op3 ...) : apply-suffix-ops(x, ys)
+
+   defproduction op0 : Exp -> Exp
+   defrule op0 = (< ?y:#e1) : (fn (x) : CallSlotExp(`lt, x, List(y)))
+   defrule op0 = (> ?y:#e1) : (fn (x) : CallSlotExp(`gt, x, List(y)))
+   defrule op0 = (<= ?y:#e1) : (fn (x) : CallSlotExp(`le, x, List(y)))
+   defrule op0 = (>= ?y:#e1) : (fn (x) : CallSlotExp(`ge, x, List(y)))
+   defrule op0 = (== ?y:#e1) : (fn (x) : CallSlotExp(`eq, x, List(y)))
+
+   defproduction op1 : Exp -> Exp
+   defrule op1 = (+ ?y:#e2) : (fn (x) : CallSlotExp(`add, x, List(y)))
+   defrule op1 = (- ?y:#e2) : (fn (x) : CallSlotExp(`sub, x, List(y)))
+
+   defproduction op2 : Exp -> Exp
+   defrule op2 = (* ?y:#e3) : (fn (x) : CallSlotExp(`mul, x, List(y)))
+   defrule op2 = (/ ?y:#e3) : (fn (x) : CallSlotExp(`div, x, List(y)))
+   defrule op2 = (% ?y:#e3) : (fn (x) : CallSlotExp(`mod, x, List(y)))
+
+   defproduction op3 : Exp -> Exp
+   defrule op3 = (. ?f:#id = ?y:#e0) : (fn (x) : SetSlotExp(f, x, y))
+   defrule op3 = (. ?f:#id(?ys:#e0 ... #emt)) : (fn (x) : CallSlotExp(f, x, ys))
+   defrule op3 = (. ?f:#id) : (fn (x) : SlotExp(f, x))
+   defrule op3 = ((@get ?i:#e0 ... #emt) = ?y:#e0) : (fn (x) : CallSlotExp(`set, x, append(i, List(y))))
+   defrule op3 = ((@get ?i:#e0 ... #emt)) : (fn (x) : CallSlotExp(`get, x, i))
+
+   defproduction e4: Exp
+   defrule e4 = (printf(?f:#str!, ?ys:#e0 ... #emt)) : PrintfExp(f, ys)
+   defrule e4 = (array(?n:#e0, ?x:#e0)) : ArrayExp(n, x)
+   defrule e4 = (object : (?ss:#slot ... #emt)) : ObjectExp(NullExp(), ss)
+   defrule e4 = (object(?p:#e0) : (?ss:#slot ... #emt)) : ObjectExp(p, ss)
+   defrule e4 = (?s:#ifexp) : s
+   defrule e4 = (while ?p:#e0 : ?b:#sexp) : WhileExp(p, b)
+   defrule e4 = (null) : NullExp()
+   defrule e4 = (?x:#id(?ys:#e0 ... #emt)) : CallExp(x, ys)
+   defrule e4 = (?x:#id = ?y:#e0) : SetExp(x, y)
+   defrule e4 = (?x:#id) : RefExp(x)
+   defrule e4 = (?x:#int) : IntExp(x)
+   defrule e4 = ((?x:#e0)) : x
+
+   defproduction id : Symbol
+   defrule id != (@do) 
+   defrule id != (@get) 
+   defrule id != (@tuple) 
+   defrule id != (@afn) 
+   defrule id != (@do-afn) 
+   defrule id != (@of) 
+   defrule id != (@cap) 
+   defrule id != (@quote) 
+   defrule id = (?x:#sym) : x
+
+   defproduction id! : Symbol
+   defrule id! = (?x:#id) : x
+   fail-if id! = () : ParseException(closest-info(), "Expected an identifier here!")
+
+   defproduction ifexp: IfExp
+   defrule ifexp = (if ?p:#e0 : ?c:#sexp else : ?a:#sexp) : IfExp(p, c, a)
+   defrule ifexp = (if ?p:#e0 : ?c:#sexp else ?a:#ifexp) : IfExp(p, c, ScopeExp(a))
+   defrule ifexp = (if ?p:#e0 : ?c:#sexp) : IfExp(p, c, ScopeExp(NullExp()))
+
+   defproduction slot: SlotStmt
+   defrule slot = (var ?n:#id! = ?e:#e0) : SlotVar(n, e)
+   defrule slot = (method ?n:#id! (?xs:#id! ... #emt) : ?b:#sexp) : SlotMethod(n, xs, b)
+
+   defproduction sexp: ScopeStmt
+   defrule sexp = (var ?n:#id! = ?e:#e0) : ScopeVar(n, e)
+   defrule sexp = (?e:#e0) : ScopeExp(e)
+   defrule sexp = (()) : ScopeBegin(List())
+   defrule sexp = ((?s:#sexp ?ss:#sexp ... #emt)) : ScopeBegin(cons(s,ss))
+
+   public defproduction texp: ScopeStmt
+   defrule texp = (var ?n:#id! = ?e:#e0) : ScopeVar(n, e)
+   defrule texp = (defn ?n:#id! (?xs:#id! ...) : ?b:#sexp) : ScopeFn(n, xs, b)
+   defrule texp = (?e:#e0) : ScopeExp(e)
+   defrule texp = (()) : ScopeBegin(List())
+   defrule texp = ((?s:#texp ?ss:#texp ... #emt)) : ScopeBegin(cons(s,ss))
+
+defn begin-to-seq (s:ScopeStmt) :
+   defn flatten (s:ScopeBegin) :
+      val stmts = to-list $ generate<ScopeStmt> :
+         defn loop (s:ScopeStmt) :
+            match(s) :
+               (s:ScopeBegin) : do(loop, stmts(s))
+               (s) : yield(s)
+         loop(s)
+      if empty?(stmts) :
+         throw $ ParseException(false, "Empty body.")
+      if last(stmts) is-not ScopeExp :
+         throw $ ParseException(false, "Last statement in scope is not an expression.")
+      defn to-seq (ss:List<ScopeStmt>) :
+         val [h t] = [head(ss), tail(ss)]
+         if empty?(t) : h
+         else : ScopeSeq(h, to-seq(t))
+      to-seq(map(begin-to-seq, stmts))
+
+   match(s) :
+      (s:ScopeBegin) : flatten(s)
+      (s) : mapr(begin-to-seq, s)
+
+public defn parse-feeny (forms) -> ScopeStmt :
+   begin-to-seq $ parse-syntax[feeny / #texp](List(forms))
+
+public defn parse-feeny-file (filename:String) -> ScopeStmt :
+   parse-feeny(read-file(filename))

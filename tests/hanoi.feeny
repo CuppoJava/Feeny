@@ -1,0 +1,27 @@
+defn towerOfHanoi (n, src, dst, buff) :
+   if n == 1:
+      move(src, dst, 1)
+   else:
+      towerOfHanoi(n - 1, src, buff, dst)
+      move(src, dst, n)
+      towerOfHanoi(n - 1, buff, dst, src)
+
+defn move (src, dst, n):
+   printf("Move plate ~ from ", n)
+   stackPrint(src)
+   printf(" stack to ")
+   stackPrint(dst)
+   printf(" stack\n")
+
+defn stackPrint (n) :
+   if n == 1:
+      printf("A")
+   else if n == 2:
+      printf("B")
+   else:
+      printf("C")
+
+defn main () :
+   towerOfHanoi(6, 1,2,3)
+
+main()

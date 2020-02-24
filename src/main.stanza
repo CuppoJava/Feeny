@@ -1,0 +1,86 @@
+defpackage feeny :
+   import core
+   import collections
+   import parser
+   import feeny/ir
+   import feeny/parser
+   import feeny/eval
+   import feeny/compile
+   import feeny/vm
+   import feeny/bytecode
+
+defn parse-commandline () :
+   val table = HashTable<Symbol,List>()
+   val args = to-seq(command-line-arguments())
+   next(args)
+   var flag = false
+   for s in args do :
+      if length(s) > 0 :
+         if s[0] == '-' :
+            flag = to-symbol(s[1 to false])
+         else if flag != false :
+            val flag = flag as Symbol
+            table[flag] = cons(s, get?(table, flag, List()))
+   for k in keys(table) do :
+      table[k] = reverse(table[k])
+   table            
+
+defn main () :
+   val args = parse-commandline()
+   if key?(args, `e) :
+      eval(args)
+   else if key?(args, `o) :
+      compile(args)
+   else if key?(args, `oast) :
+      save-ast(args)
+   else if key?(args, `past) :
+      print-ast(args)
+   else if key?(args, `pb) :
+      print-bytecode(args)
+   else if key?(args, `rb) :
+      run-bytecode(args)
+   else :
+      println("No option given.")
+
+defn print-bytecode (args:HashTable<Symbol,List>) :
+   val infile:String = head(args[`pb])
+   val prog = load-bytecode(infile)
+   println(prog)
+
+defn run-bytecode (args:HashTable<Symbol,List>) :
+   val infile:String = head(args[`rb])
+   val prog = load-bytecode(infile)
+   run(link(prog))
+
+defn compile (args:HashTable<Symbol,List>) :
+   val infile:String = head(args[`i])
+   val outfile:String = head(args[`o])
+   val parsed = parse-feeny-file(infile)
+   val compiled = compile(parsed)
+   save-bytecode(compiled, outfile)
+
+defn save-ast (args:HashTable<Symbol,List>) :
+   val infile:String = head(args[`i])
+   val outfile:String = head(args[`oast])
+   val parsed = parse-feeny-file(infile)
+   save-ast(parsed, outfile)
+
+defn print-ast (args:HashTable<Symbol,List>) :
+   val infile:String = head(args[`past])
+   val ast = load-ast(infile)
+   println(ast)
+
+defn eval (args:HashTable<Symbol,List>) :
+   val infile:String = head(args[`e])
+   val parsed = parse-feeny-file(infile)
+   eval(parsed)
+
+try :
+   main()
+catch (e:IOException|
+         NoMatchException|
+         feeny/vm/EvalException|
+         feeny/eval/EvalException|
+         reader/LexerException) :
+   println(e)
+   exit(-1)

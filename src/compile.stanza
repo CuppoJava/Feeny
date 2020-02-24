@@ -1,0 +1,193 @@
+defpackage feeny/compile :
+   import core
+   import collections
+   import feeny/ir
+   import feeny/abc
+
+public defn compile (s:ScopeStmt) :
+   ;Constant Pool
+   val consts = Vector<Const>()
+   val int-map = IntTable<Int>()
+   val string-map = HashTable<String,Int>()
+   var null-idx = false
+
+   ;Constant Compiler
+   defn new-const (c:Const) :
+      add(consts, c)
+      length(consts) - 1
+   defn const-idx (s:String) :
+      match(get?(string-map, s, false)) :
+         (i:Int) :
+            i
+         (f:False) :
+            val i = new-const(StringConst(s))
+            string-map[s] = i
+            i
+   defn const-idx (s:Symbol) :
+      const-idx(to-string(s))
+   defn const-idx (x:Int) :
+      match(get?(int-map, x, false)) :
+         (i:Int) :
+            i
+         (f:False) :
+            val i = new-const(IntConst(x))
+            int-map[x] = i
+            i
+   defn get-null-idx () :
+      if null-idx == false :
+         null-idx = new-const(NullConst())
+      null-idx as Int
+
+   ;Instruction Accumulator
+   var ins-accum = Vector<Ins>()
+   defn emit (i:Ins) : add(ins-accum, i)
+   defn compile-ins (f: () -> ?) :
+      let-var ins-accum = Vector<Ins>() :
+         f()
+         to-list(ins-accum)
+
+   ;Method Compiler
+   defn compile-method (name:Symbol, args:List<Symbol>, s:ScopeStmt) :
+      val n = length(args)
+      var n2
+      val env = map(KeyValue, args, 0 to n)
+      val code = compile-ins $ fn () :
+         n2 = cs(s, env, n)
+         emit $ ReturnIns()
+      MethodConst(const-idx(name), n, n2 - n, code)
+
+   ;Class Compiler
+   defn cclass (e:ObjectExp) -> Int :
+      val slot-idxs = Vector<Int>()
+      for s in slots(e) do :
+         add{slot-idxs, new-const(_)} $ match(s) :
+            (s:SlotVar) : SlotConst(const-idx(name(s)))
+            (s:SlotMethod) : compile-method(name(s), cons(`this, args(s)), body(s))
+      new-const(ClassConst(to-list(slot-idxs)))
+
+   ;Expression Compiler
+   defn c (e:Exp, env:List<KeyValue<Symbol,Int>>, si:Int) -> Int :
+      ;Local storage tracker
+      var max-si:Int = si
+      defn ce (e:Exp) :
+         max-si = max(max-si, c(e, env, si))
+      defn cb (s:ScopeStmt) :
+         max-si = max(max-si, cs(s, env, si))
+         
+      match(e) :
+         (e:IntExp) :
+            emit $ LitIns(const-idx(value(e)))
+         (e:NullExp) :
+            emit $ LitIns(get-null-idx())
+         (e:PrintfExp) :
+            do(ce, exps(e))
+            emit $ PrintfIns(const-idx(format(e)), length(exps(e)))
+         (e:ArrayExp) :
+            ce(length(e))
+            ce(init(e))
+            emit $ ArrayIns()
+         (e:ObjectExp) :
+            ce(parent(e))
+            do(ce{exp(_)}, filter-by<SlotVar>(slots(e)))
+            emit $ ObjectIns(cclass(e))
+         (e:SlotExp) :
+            ce(exp(e))
+            emit $ SlotIns(const-idx(name(e)))
+         (e:SetSlotExp) :
+            ce(exp(e))
+            ce(value(e))
+            emit $ SetSlotIns(const-idx(name(e)))
+         (e:CallSlotExp) :
+            ce(exp(e))
+            do(ce, args(e))
+            emit $ CallSlotIns(const-idx(name(e)), length(args(e)) + 1)
+         (e:CallExp) :
+            do(ce, args(e))
+            emit $ CallIns(const-idx(name(e)), length(args(e)))
+         (e:RefExp) :
+            emit $ match(lookup?(env, name(e))) :
+               (n:Int) : GetLocalIns(n)
+               (n:False) : GetGlobalIns(const-idx(name(e)))
+         (e:SetExp) :
+            ce(exp(e))
+            emit $ match(lookup?(env, name(e))) :
+               (n:Int) : SetLocalIns(n)
+               (n:False) : SetGlobalIns(const-idx(name(e)))
+         (e:IfExp) :
+            val cl = const-idx(gensym(`conseq))
+            val el = const-idx(gensym(`end))
+            ce(pred(e))
+            emit $ BranchIns(cl)
+               cb(alt(e))
+               emit $ GotoIns(el)
+            emit $ LabelIns(cl)
+               cb(conseq(e))
+            emit $ LabelIns(el)
+         (e:WhileExp) :
+            val tl = const-idx(gensym(`test))
+            val ll = const-idx(gensym(`loop))
+            emit $ GotoIns(tl)
+            emit $ LabelIns(ll)
+            cb(body(e))
+            emit $ DropIns()
+            emit $ LabelIns(tl)
+            ce(pred(e))
+            emit $ BranchIns(ll)
+            ce(NullExp())
+
+      ;Return maximum stack index
+      max-si
+
+   ;Statement Compiler
+   defn cs (s:ScopeStmt, env:List<KeyValue<Symbol,Int>>, si:Int) -> Int :
+      match(s) :
+         (s:ScopeExp) :
+            c(exp(s), env, si)
+         (s:ScopeSeq) :
+            match(a(s)) :
+               (v:ScopeVar) :
+                  val m1 = c(exp(v), env, si)
+                  emit $ SetLocalIns(si)
+                  emit $ DropIns()
+                  val m2 = cs(b(s), cons(name(v) => si, env), si + 1)
+                  max(m1, m2)
+               (e:ScopeSeq) :
+                  cs(ScopeSeq(a(e), ScopeSeq(b(e), b(s))), env, si)
+               (e:ScopeExp) :
+                  val m1 = cs(e, env, si)
+                  emit $ DropIns()
+                  val m2 = cs(b(s), env, si)
+                  max(m1, m2)
+
+   ;Top Compiler
+   val globals = Vector<Int>()
+   
+   defn compile-top-method (s:ScopeStmt) :
+      var n2
+      val code = compile-ins $ fn () :
+         n2 = ctop(s)
+         emit $ LitIns(get-null-idx())
+         emit $ ReturnIns()
+      MethodConst(const-idx(gensym(`entry)), 0, n2, code)
+      
+   defn ctop (s:ScopeStmt) -> Int :
+      match(s) :
+         (s:ScopeVar) :
+            val m = c(exp(s), List(), 0)
+            emit $ SetGlobalIns(const-idx(name(s)))
+            emit $ DropIns()
+            add(globals, new-const(SlotConst(const-idx(name(s)))))
+            m
+         (s:ScopeFn) :
+            add(globals, new-const(compile-method(name(s), args(s), body(s))))
+            0
+         (s:ScopeExp) :
+            val m = c(exp(s), List(), 0)
+            emit $ DropIns()
+            m
+         (s:ScopeSeq) :
+            max(ctop(a(s)), ctop(b(s)))
+
+   ;Driver
+   val entry = new-const(compile-top-method(s))
+   Program(to-list(consts), to-list(globals), entry)

@@ -1,0 +1,14 @@
+package feeny/vm defined-in "src/vm.stanza"
+package feeny/bytecode defined-in "src/bytecode.stanza"
+package feeny/parser defined-in "src/parser.stanza"
+package feeny/eval defined-in "src/eval.stanza"
+package feeny/ir defined-in "src/ir.stanza"
+package feeny defined-in "src/main.stanza"
+package feeny/compile defined-in "src/compile.stanza"
+package feeny/abc defined-in "src/abscode.stanza"
+
+build feeny :
+  inputs: feeny
+  pkg: "build"
+  o: "bin/feeny"
+  optimize

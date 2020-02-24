@@ -1,0 +1,220 @@
+defpackage feeny/bytecode :
+   import core
+   import collections
+   import feeny/abc
+
+;================= DRIVER ===================================
+public defn save-bytecode (p:Program, filename:String) :
+   let-var OUTFILE = FileOutputStream(filename) :
+      try :
+         emit(p)
+      finally :   
+         close(OUTFILE as FileOutputStream)
+
+public defn load-bytecode (filename:String) -> Program :
+   let-var INFILE = FileInputStream(filename) :
+      try :
+         read-program()
+      finally :   
+         close(INFILE as FileInputStream)
+
+;=================== TAGS ===================================
+val tag-counter = to-seq(0 to false)
+val INT-TAG = next(tag-counter)
+val NULL-TAG = next(tag-counter)
+val STRING-TAG = next(tag-counter)
+val METHOD-TAG = next(tag-counter)
+val SLOT-TAG = next(tag-counter)
+val CLASS-TAG = next(tag-counter)
+
+val opcode-counter = to-seq(0 to false)
+val LABEL-OP = next(opcode-counter)
+val LIT-OP = next(opcode-counter)
+val PRINTF-OP = next(opcode-counter)
+val ARRAY-OP = next(opcode-counter)
+val OBJECT-OP = next(opcode-counter)
+val SLOT-OP = next(opcode-counter)
+val SET-SLOT-OP = next(opcode-counter)
+val CALL-SLOT-OP = next(opcode-counter)
+val CALL-OP = next(opcode-counter)
+val SET-LOCAL-OP = next(opcode-counter)
+val GET-LOCAL-OP = next(opcode-counter)
+val SET-GLOBAL-OP = next(opcode-counter)
+val GET-GLOBAL-OP = next(opcode-counter)
+val BRANCH-OP = next(opcode-counter)
+val GOTO-OP = next(opcode-counter)
+val RETURN-OP = next(opcode-counter)
+val DROP-OP = next(opcode-counter)
+
+;=================== EMITTING ================================
+var OUTFILE: FileOutputStream|False = false
+defn emit-byte (i:Int) :
+   put(OUTFILE as FileOutputStream, to-byte(i))
+defn emit-short (i:Int) :
+   put(OUTFILE as FileOutputStream, to-byte(i))
+   put(OUTFILE as FileOutputStream, to-byte(i >> 8))
+defn emit-int (i:Int) :   
+   put(OUTFILE as FileOutputStream, to-byte(i))
+   put(OUTFILE as FileOutputStream, to-byte(i >> 8))
+   put(OUTFILE as FileOutputStream, to-byte(i >> 16))
+   put(OUTFILE as FileOutputStream, to-byte(i >> 24))
+defn emit-string (s:String) :
+   emit-int(length(s))
+   for c in s do :
+      put(OUTFILE as FileOutputStream, c)
+
+;================ INSTRUCTION ENCODING =======================
+defn emit (i:Ins) -> False :
+   match(i) :
+      (i:LabelIns) :
+         emit-byte(LABEL-OP)
+         emit-short(name(i))
+      (i:LitIns) :
+         emit-byte(LIT-OP)
+         emit-short(idx(i))
+      (i:PrintfIns) :
+         emit-byte(PRINTF-OP)
+         emit-short(format(i))
+         emit-byte(arity(i))
+      (i:ArrayIns) :
+         emit-byte(ARRAY-OP)
+      (i:ObjectIns) :
+         emit-byte(OBJECT-OP)
+         emit-short(class(i))
+      (i:SlotIns) :
+         emit-byte(SLOT-OP)
+         emit-short(name(i))
+      (i:SetSlotIns) :
+         emit-byte(SET-SLOT-OP)
+         emit-short(name(i))
+      (i:CallSlotIns) :
+         emit-byte(CALL-SLOT-OP)
+         emit-short(name(i))
+         emit-byte(arity(i))
+      (i:CallIns) :
+         emit-byte(CALL-OP)
+         emit-short(name(i))
+         emit-byte(arity(i))
+      (i:SetLocalIns) :
+         emit-byte(SET-LOCAL-OP)
+         emit-short(idx(i))
+      (i:GetLocalIns) :
+         emit-byte(GET-LOCAL-OP)
+         emit-short(idx(i))
+      (i:SetGlobalIns) :
+         emit-byte(SET-GLOBAL-OP)
+         emit-short(name(i))
+      (i:GetGlobalIns) :
+         emit-byte(GET-GLOBAL-OP)
+         emit-short(name(i))
+      (i:BranchIns) :
+         emit-byte(BRANCH-OP)
+         emit-short(name(i))         
+      (i:GotoIns) :
+         emit-byte(GOTO-OP)
+         emit-short(name(i))
+      (i:ReturnIns) :
+         emit-byte(RETURN-OP)
+      (i:DropIns) :
+         emit-byte(DROP-OP)
+
+;=============== CONSTANT ENCODING =========================
+defn emit (c:Const) -> False :
+   match(c) :
+      (c:IntConst) :
+         emit-byte(INT-TAG)
+         emit-int(value(c))
+      (c:NullConst) :
+         emit-byte(NULL-TAG)
+      (c:StringConst) :
+         emit-byte(STRING-TAG)
+         emit-string(value(c))
+      (c:MethodConst) :
+         emit-byte(METHOD-TAG)
+         emit-short(name(c))
+         emit-byte(nargs(c))
+         emit-short(nlocals(c))
+         emit-int(length(code(c)))
+         do(emit, code(c))
+      (c:SlotConst) :
+         emit-byte(SLOT-TAG)
+         emit-short(name(c))
+      (c:ClassConst) :
+         emit-byte(CLASS-TAG)
+         emit-short(length(slots(c)))
+         do(emit-short, slots(c))
+
+;================ PROGRAM ENCODING =========================
+defn emit (p:Program) -> False :
+   emit-short(length(consts(p)))
+   do(emit, consts(p))
+   emit-short(length(slots(p)))
+   do(emit-short, slots(p))
+   emit-short(entry(p))
+
+;================ READING ===================================
+var INFILE: FileInputStream|False = false
+defn read-byte () :
+   match(get-byte(INFILE as FileInputStream)) :
+      (i:Byte) : to-int(i)
+      (f:False) : fatal("Unexpected end of file.")
+defn read-short () :
+   read-byte() +
+   read-byte() << 8
+defn read-int () :
+   read-byte() +
+   read-byte() << 8 +
+   read-byte() << 16 +
+   read-byte() << 24
+defn read-string () :
+   val l = read-int()
+   String(for i in 0 to l seq : to-char(read-byte()))
+
+;================ PROGRAM INPUT =============================
+defn read-code () :
+   val l = read-int()
+   to-list $ seq(read-ins{}, 0 to l)
+
+defn read-slots () :
+   val l = read-short()
+   to-list $ seq(read-short{}, 0 to l)
+   
+defn read-const () :
+   val tag = read-byte()
+   switch(tag) :
+      INT-TAG : IntConst(read-int())
+      NULL-TAG : NullConst()
+      STRING-TAG : StringConst(read-string())
+      METHOD-TAG : MethodConst(read-short(), read-byte(), read-short(), read-code())
+      SLOT-TAG : SlotConst(read-short())
+      CLASS-TAG : ClassConst(read-slots())
+      else : fatal("Not a Constant Tag: %~" % [tag])
+
+defn read-ins () :
+   val op = read-byte()
+   switch(op) :
+      LABEL-OP : LabelIns(read-short())
+      LIT-OP : LitIns(read-short())
+      PRINTF-OP : PrintfIns(read-short(), read-byte())
+      ARRAY-OP : ArrayIns()
+      OBJECT-OP : ObjectIns(read-short())
+      SLOT-OP : SlotIns(read-short())
+      SET-SLOT-OP : SetSlotIns(read-short())
+      CALL-SLOT-OP : CallSlotIns(read-short(), read-byte())
+      CALL-OP : CallIns(read-short(), read-byte())
+      SET-LOCAL-OP : SetLocalIns(read-short())
+      GET-LOCAL-OP : GetLocalIns(read-short())
+      SET-GLOBAL-OP : SetGlobalIns(read-short())
+      GET-GLOBAL-OP : GetGlobalIns(read-short())
+      BRANCH-OP : BranchIns(read-short())
+      GOTO-OP : GotoIns(read-short())
+      RETURN-OP : ReturnIns()
+      DROP-OP : DropIns()
+      else : fatal("Invalid opcode: %~" % [op])
+
+public defn read-program () :
+   val numc = read-short()
+   val consts = to-list $ seq(read-const{}, 0 to numc)
+   val slots = read-slots()
+   val entry = read-short()
+   Program(consts, slots, entry)

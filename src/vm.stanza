@@ -1,0 +1,484 @@
+defpackage feeny/vm :
+   import core
+   import collections
+   import feeny/abc
+
+;============================================================
+;================== Evaluation Exception ====================
+;============================================================
+public deftype EvalException <: Exception
+defn EvalException (msg) :
+   new EvalException :
+      defmethod print (o:OutputStream, this) :
+         print(o, msg)
+
+;============================================================
+;====================== VM Objects ==========================
+;============================================================
+defstruct Null
+
+defstruct Object :
+   class: Int
+   parent: Object|Null
+   slots: Array<Int|Array|Object|Null>
+
+defmethod print (o:OutputStream, n:Null) :
+   print(o, "null")
+
+defmethod print (o:OutputStream, obj:Object) :
+   print(o, "object")
+
+;============================================================
+;================== Linked Program ==========================
+;============================================================
+deftype LIns
+defstruct LInt <: LIns : (value:Int)
+defstruct LNull <: LIns
+defstruct LPrintf <: LIns : (format:String, arity:Int)
+defstruct LArray <: LIns
+defstruct LObject <: LIns : (class:Int, arity:Int)
+defstruct LSlot <: LIns : (name:Symbol)
+defstruct LSetSlot <: LIns : (name:Symbol)
+defstruct LCallSlot <: LIns : (name:Symbol, arity:Int)
+defstruct LCall <: LIns : (code:Int, arity:Int)
+defstruct LSetLocal <: LIns : (idx:Int)
+defstruct LGetLocal <: LIns : (idx:Int)
+defstruct LSetGlobal <: LIns : (idx:Int)
+defstruct LGetGlobal <: LIns : (idx:Int)
+defstruct LBranch <: LIns : (code:Int)
+defstruct LGoto <: LIns : (code:Int)
+defstruct LReturn <: LIns
+defstruct LDrop <: LIns
+defstruct LFrame <: LIns : (nargs:Int, nlocals:Int)
+defstruct LClass : (slots: Array<ClassSlot>)
+
+deftype ClassSlot
+defmulti name (c:ClassSlot) -> Symbol
+defstruct VarSlot <: ClassSlot : (name:Symbol with: (as-method => true), idx:Int)
+defstruct CodeSlot <: ClassSlot : (name:Symbol with: (as-method => true), code:Int)
+
+defstruct LProg : (ins: Array<LIns>, classes: Array<LClass>, num-globals:Int, entry:Int)
+
+defmethod print (o:OutputStream, i:LIns) :
+   print{o, _} $ match(i) :
+      (i:LInt) : "int %~" % [value(i)]
+      (i:LNull) : "null"
+      (i:LPrintf) : "printf %~ %~" % [format(i), arity(i)]
+      (i:LArray) : "array"
+      (i:LObject) : "object %~ %~" % [class(i), arity(i)]
+      (i:LSlot) : "slot %~" % [name(i)]
+      (i:LSetSlot) : "set-slot %~" % [name(i)]
+      (i:LCallSlot) : "call-slot %~ %~" % [name(i), arity(i)]
+      (i:LCall) : "call %~ %~" % [code(i), arity(i)]
+      (i:LSetLocal) : "set local %~" % [idx(i)]
+      (i:LGetLocal) : "get local %~" % [idx(i)]
+      (i:LSetGlobal) : "set global %~" % [idx(i)]
+      (i:LGetGlobal) : "get global %~" % [idx(i)]
+      (i:LBranch) : "branch %~" % [code(i)]
+      (i:LGoto) : "goto %~" % [code(i)]
+      (i:LReturn) : "return"
+      (i:LDrop) : "drop"
+      (i:LFrame) : "frame %~ %~" % [nargs(i), nlocals(i)]
+
+defmethod print (o:OutputStream, c:LClass) :
+   print{o, _} $ "class(%*)" % [join(slots(c), ", ")]
+
+defmethod print (o:OutputStream, s:ClassSlot) :
+   print{o, _} $ match(s) :
+      (s:VarSlot) : "slot %~ %~" % [name(s), idx(s)]
+      (s:CodeSlot) : "method %~ %~" % [name(s), code(s)]
+
+defmethod print (o:OutputStream, p:LProg) :
+   val io = IndentedStream(o)
+   print(o, "Entry: %~" % [entry(p)])
+   print(o, "\nClasses:")
+   for (c in classes(p), i in 0 to false) do :
+      print(io, "\nClass %~ :" % [i])
+      for s in slots(c) do :
+         print(io, "\n   %~" % [s])
+   print(o, "\nInstructions:")
+   for (c in ins(p), i in 0 to false) do :
+      print(io, "\n%~ : %~" % [i, c])
+
+;============================================================
+;================== Program Linking =========================
+;============================================================
+public defn link (p:Program) :
+   ;Instructions and Labels
+   val ins-vector = Vector<LIns>()
+   val label-map = HashTable<String,Int>()
+
+   ;Constant pool
+   val const-map = to-array<Const>(consts(p))
+   defn str-const (i:Int) : value(const-map[i] as StringConst)
+   defn sym-const (i:Int) : to-symbol(str-const(i))
+   defn class-const (i:Int) : const-map[i] as ClassConst
+
+   ;Classes
+   val class-map = IntTable<Int>()
+   val class-vector = Vector<LClass>()
+
+   ;Global Functions/Variables
+   val function-map = HashTable<String,Int>()
+   val var-map = HashTable<String,Int>()
+
+   ;Code Patches
+   val patch-vector = Vector<(() -> ?)>()
+   defn add-patch (f: () -> LIns) :
+      val p = length(ins-vector)
+      add(ins-vector, LNull())
+      add{patch-vector, _} $ fn () :
+         ins-vector[p] = f()
+   defn run-patches () :
+      for f in patch-vector do : f()
+   
+   ;Instruction Linking
+   defn link-ins (ins:List<Ins>) :
+      for i in ins do :
+         match(i) :
+            (i:LabelIns) :
+               val s = str-const(name(i))
+               label-map[s] = length(ins-vector)
+            (i:LitIns) :
+               add{ins-vector, _} $ match(const-map[idx(i)]) :
+                  (v:IntConst) : LInt(value(v))
+                  (v:NullConst) : LNull()
+            (i:PrintfIns) :
+               add(ins-vector, LPrintf(str-const(format(i)), arity(i)))
+            (i:ArrayIns) :
+               add(ins-vector, LArray())
+            (i:ObjectIns) :
+               add-patch $ fn () :
+                  val ci = class-map[class(i)]
+                  val c = class-vector[ci]
+                  val arity = count({_ is VarSlot}, slots(c))
+                  LObject(ci, arity)
+            (i:SlotIns) :
+               add(ins-vector, LSlot(sym-const(name(i))))
+            (i:SetSlotIns) :
+               add(ins-vector, LSetSlot(sym-const(name(i))))
+            (i:CallSlotIns) :
+               add(ins-vector, LCallSlot(sym-const(name(i)), arity(i)))
+            (i:CallIns) :
+               add-patch $ fn () :
+                  val f = function-map[str-const(name(i))]
+                  LCall(f, arity(i))
+            (i:SetLocalIns) :
+               add(ins-vector, LSetLocal(idx(i)))
+            (i:GetLocalIns) :
+               add(ins-vector, LGetLocal(idx(i)))
+            (i:SetGlobalIns) :
+               add-patch $ fn () :
+                  val s = str-const(name(i))
+                  LSetGlobal(var-map[s])
+            (i:GetGlobalIns) :
+               add-patch $ fn () :
+                  val s = str-const(name(i))
+                  LGetGlobal(var-map[s])
+            (i:BranchIns) :
+               add-patch $ fn () :
+                  val d = label-map[str-const(name(i))]
+                  LBranch(d)
+            (i:GotoIns) :
+               add-patch $ fn () :
+                  val d = label-map[str-const(name(i))]
+                  LGoto(d)
+            (i:ReturnIns) :
+               add(ins-vector, LReturn())
+            (i:DropIns) :
+               add(ins-vector, LDrop())
+
+   ;Code Linking
+   val code-map = IntTable<Int>()
+   for (m in const-map, i in 0 to false) do :
+      if m is MethodConst :
+         val m = m as MethodConst
+         code-map[i] = length(ins-vector)
+         add(ins-vector, LFrame(nargs(m), nlocals(m)))
+         link-ins(code(m))
+
+   ;Class Linking
+   for (c in const-map, i in 0 to false) do :
+      if c is ClassConst :
+         val c = c as ClassConst
+         class-map[i] = length(class-vector)
+         val idx-counter = to-seq(0 to false)
+         val class-slots = to-array<ClassSlot> $ for s in slots(c) seq :
+            match(const-map[s]) :
+               (v:SlotConst) : VarSlot(sym-const(name(v)), next(idx-counter))
+               (m:MethodConst) : CodeSlot(sym-const(name(m)), code-map[s]) 
+         add(class-vector, LClass(class-slots))
+
+   ;Global Functions/Variables
+   val var-counter = to-seq(0 to false)
+   for s in slots(p) do :
+      match(const-map[s]) :
+         (v:SlotConst) : var-map[str-const(name(v))] = next(var-counter)
+         (m:MethodConst) : function-map[str-const(name(m))] = code-map[s]
+
+   ;Patch Program
+   run-patches()
+   LProg(to-array<LIns>(ins-vector),
+         to-array<LClass>(class-vector),
+         next(var-counter),
+         code-map[entry(p)])
+
+;============================================================
+;================== VM Evaluation ===========================
+;============================================================
+public defn run (p:LProg) -> False :
+   ;Global state
+   val ins = ins(p)
+   val classes = classes(p)
+   val null = Null()
+   val globals = Array<Int|Array|Object|Null>(num-globals(p), null)
+   val vstack = Vector<Int|Array|Object|Null>()
+   val fstack = Vector<Int|Array|Object|Null>()
+
+   defn* step (ip:Int, fp:Int, n:Int) -> False :     
+      if ip >= 0 :
+;         println("Run %~: %~" % [ip, ins[ip]])
+;         println("   Vstack: %~" % [vstack])
+;         println("   Fstack: %~" % [fstack])
+;         println("   fp = %~" % [fp])
+         match(ins[ip]) :
+            (i:LInt) :
+               add(vstack, value(i))
+               step(ip + 1, fp, 0)
+            (i:LNull) :
+               add(vstack, null)
+               step(ip + 1, fp, 0)
+            (i:LPrintf) :
+               val args = reverse $ to-list $
+                  for j in 0 to arity(i) seq :
+                     pop(vstack)
+               pprint(format(i), args)
+               add(vstack, null)
+               step(ip + 1, fp, 0)
+            (i:LArray) :
+               val init = pop(vstack)
+               val len = pop(vstack)
+               ensure-int(len)
+               add(vstack, Array<?>(len as Int, init))
+               step(ip + 1, fp, 0)
+            (i:LObject) :
+               val slots = Array<Int|Array|Object|Null>(arity(i))
+               for i in (arity(i) - 1) through 0 by -1 do :
+                  slots[i] = pop(vstack)
+               val parent = pop(vstack)
+               ensure-parent(parent)            
+               add(vstack, Object(class(i), parent as Object|Null, slots))
+               step(ip + 1, fp, 0)
+            (i:LSlot) :
+               match(pop(vstack)) :
+                  (v:Int) : no-slot(name(i), `Int)
+                  (v:Array) : no-slot(name(i), `Array)
+                  (v:Null) : no-slot(name(i), `Null)
+                  (v:Object) : add(vstack, get-obj-slot(v, name(i)))
+               step(ip + 1, fp, 0)
+            (i:LSetSlot) :
+               val x = pop(vstack)
+               val obj = pop(vstack)
+               match(obj) :
+                  (obj:Int) : no-slot(name(i), `Int)
+                  (obj:Array) : no-slot(name(i), `Array)
+                  (obj:Null) : no-slot(name(i), `Null)
+                  (obj:Object) : set-obj-slot(obj, name(i), x)
+               add(vstack, x)
+               step(ip + 1, fp, 0)
+            (i:LCallSlot) :
+               val sp = length(vstack)
+               val obj = vstack[sp - arity(i)]
+               match(obj) :
+                  (obj:Int) :
+                     call-int-slot(name(i), arity(i))
+                     step(ip + 1, fp, 0)
+                  (obj:Array) :
+                     call-array-slot(name(i), arity(i))
+                     step(ip + 1, fp, 0)
+                  (obj:Null) :
+                     no-slot(name(i), `Null)
+                  (obj:Object) :
+                     val m = get-method(obj, name(i))
+                     val newfp = length(fstack)
+                     add(fstack, ip + 1)
+                     add(fstack, fp)
+                     step(code(m), newfp, arity(i))
+            (i:LCall) :
+               val newfp = length(fstack)
+               add(fstack, ip + 1)
+               add(fstack, fp)
+               step(code(i), newfp, arity(i))
+            (i:LSetLocal) :
+               fstack[fp + 2 + idx(i)] = peek(vstack)
+               step(ip + 1, fp, 0)
+            (i:LGetLocal) :
+               add(vstack, fstack[fp + 2 + idx(i)])
+               step(ip + 1, fp, 0)
+            (i:LSetGlobal) :
+               globals[idx(i)] = peek(vstack)
+               step(ip + 1, fp, 0)
+            (i:LGetGlobal) :
+               add(vstack, globals[idx(i)])
+               step(ip + 1, fp, 0)
+            (i:LBranch) :
+               if pop(vstack) is Null : step(ip + 1, fp, 0)
+               else : step(code(i), fp, 0)
+            (i:LGoto) :
+               step(code(i), fp, 0)
+            (i:LReturn) :
+               val oldfp = fstack[fp + 1] as Int
+               val ret = fstack[fp] as Int
+               set-length(fstack, fp, null)
+               step(ret, oldfp, 0)
+            (i:LFrame) :
+               ensure-arity(n, nargs(i))
+               set-length(fstack, fp + 2 + nargs(i) + nlocals(i), null)
+               for i in (n - 1) through 0 by -1 do :
+                  fstack[fp + 2 + i] = pop(vstack)
+               step(ip + 1, fp, 0)   
+            (i:LDrop) :
+               pop(vstack)
+               step(ip + 1, fp, 0)
+
+   ;=== Type Specific Methods ===
+   defn get-obj-slot (o:Object|Null, slotname:Symbol) :
+      match(o) :
+         (o:Null) :
+            no-slot(slotname, `Object)
+         (o:Object) :
+            val c = classes[class(o)]
+            match(find({name(_) == slotname}, slots(c))) :
+               (s:VarSlot) : slots(o)[idx(s)]
+               (s:CodeSlot) : get-method-error(slotname)
+               (s:False) : get-obj-slot(parent(o), slotname)
+
+   defn set-obj-slot (o:Object|Null, slotname:Symbol, value:Int|Array|Object|Null) :
+      match(o) :
+         (o:Null) :
+            no-slot(slotname, `Object)
+         (o:Object) :
+            val c = classes[class(o)]
+            match(find({name(_) == slotname}, slots(c))) :
+               (s:VarSlot) : slots(o)[idx(s)] = value
+               (s:CodeSlot) : set-method-error(slotname)
+               (s:False) : set-obj-slot(parent(o), slotname, value)
+                        
+   defn call-int-slot (slotname:Symbol, n:Int) :
+      ensure-arity(n, 2)
+      val y? = pop(vstack)
+      val x = pop(vstack) as Int
+      ensure-int(y?)
+      val y = y? as Int
+      defn to-fbool (b:True|False) : 0 when b else null
+      add{vstack, _} $ switch(slotname) :
+         `eq : to-fbool(x == y)
+         `lt : to-fbool(x < y)
+         `le : to-fbool(x <= y)
+         `gt : to-fbool(x > y)
+         `ge : to-fbool(x >= y)
+         `add : x + y
+         `sub : x - y
+         `mul : x * y
+         `div : x / y
+         `mod : x % y         
+         else : no-slot(slotname, `Int)
+      
+   defn call-array-slot (slotname:Symbol, n:Int) :
+      add{vstack, _} $ switch(slotname) :
+         `get :
+            ensure-arity(n, 2)
+            val i = pop(vstack)
+            val a = pop(vstack)
+            ensure-index(i, a)
+            (a as Array)[i as Int]
+         `set :
+            ensure-arity(n, 3)
+            val v = pop(vstack)
+            val i = pop(vstack)
+            val a = pop(vstack)
+            ensure-index(i, a)
+            (a as Array)[i as Int] = v
+            null
+         `length :
+            ensure-arity(n, 1)
+            val a = pop(vstack)
+            length(a as Array)
+         else :
+            no-slot(slotname, `Array)
+
+   defn get-method (o:Object|Null, slotname:Symbol) :
+      match(o) :
+         (o:Null) :
+            no-slot(slotname, `Object)
+         (o:Object) :
+            val c = classes[class(o)]
+            match(find({name(_) == slotname}, slots(c))) :
+               (s:VarSlot) : call-var-error(slotname)
+               (s:CodeSlot) : s
+               (s:False) : get-method(parent(o), slotname)
+
+   ;=== Pretty Printing ===
+   defn pprint (format:String, args:Seqable) :
+      val arg-seq = to-seq(args)
+      val n = length(format)
+      let loop (i:Int = 0) :
+         if i < n :
+            switch(format[i]) :
+               '~' :
+                  if empty?(arg-seq) :
+                     throw $ EvalException $
+                     "Format string %~ is expecting more arguments." % [format]
+                  print(next(arg-seq))
+                  loop(i + 1)
+               else :
+                  print(format[i])
+                  loop(i + 1)
+         else :
+            if not empty?(arg-seq) :
+               throw $ EvalException $
+               "Unexpected end of format string %~. More arguments remaining." % [format]
+
+   ;=== Error Reporting ===
+   defn ensure-arity (a:Int, da:Int) :
+      if a != da :
+         throw $ EvalException $
+         "Incorrect arity. Given %~ but expected %~ arguments." % [a, da]
+
+   defn no-slot (name:Symbol, type:Symbol) :
+      throw $ EvalException $
+      "No slot named %~ in object of type %~." % [name, type]
+
+   defn get-method-error (name:Symbol) :
+      throw $ EvalException $
+      "Cannot directly retrieve method slot %~." % [name]
+
+   defn set-method-error (name:Symbol) :
+      throw $ EvalException $
+      "Cannot directly assign to method slot %~." % [name]
+
+   defn call-var-error (name:Symbol) :
+      throw $ EvalException $
+      "Cannot call variable slot %~ as method." % [name]
+
+   defn ensure-parent (o) :
+      if o is-not Object|Null :
+         throw $ EvalException $
+         "Expected either an object or null as parent."
+
+   defn ensure-int (o) :
+      if o is-not Int :
+         throw $ EvalException $
+         "Expected an integer."
+
+   defn ensure-index (i, a) :
+      ensure-int(i)
+      if (i < 0) or (i >= length(a)) :
+         throw $ EvalException $
+         "Index (%~) out of bounds." % [i]
+
+   ;=== Driver ===
+   add(fstack, -1)
+   add(fstack, -1)
+   step(entry(p), 0, 0)
+

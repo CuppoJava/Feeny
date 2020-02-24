@@ -1,0 +1,92 @@
+defpackage feeny/abc :
+   import core
+   import collections
+
+;============================================================
+;=================== Abstract Code ==========================
+;============================================================
+
+public deftype Const
+public defstruct IntConst <: Const : (value:Int)
+public defstruct NullConst <: Const
+public defstruct StringConst <: Const : (value:String)
+public defstruct MethodConst <: Const : (name:Int, nargs:Int, nlocals:Int, code:List<Ins>)
+public defstruct SlotConst <: Const : (name:Int)
+public defstruct ClassConst <: Const : (slots:List<Int>)
+
+public deftype Ins
+public defstruct LabelIns <: Ins : (name:Int)
+public defstruct LitIns <: Ins : (idx:Int)
+public defstruct PrintfIns <: Ins : (format:Int, arity:Int)
+public defstruct ArrayIns <: Ins
+public defstruct ObjectIns <: Ins : (class:Int)
+public defstruct SlotIns <: Ins : (name:Int)
+public defstruct SetSlotIns <: Ins : (name:Int)
+public defstruct CallSlotIns <: Ins : (name:Int, arity:Int)
+public defstruct CallIns <: Ins : (name:Int, arity:Int)
+public defstruct SetLocalIns <: Ins : (idx:Int)
+public defstruct GetLocalIns <: Ins : (idx:Int)
+public defstruct SetGlobalIns <: Ins : (name:Int)
+public defstruct GetGlobalIns <: Ins : (name:Int)
+public defstruct BranchIns <: Ins : (name:Int)
+public defstruct GotoIns <: Ins : (name:Int)
+public defstruct ReturnIns <: Ins
+public defstruct DropIns <: Ins
+
+public defstruct Program :
+   consts: List<Const>
+   slots: List<Int>
+   entry: Int
+
+;============================================================
+;==================== Printer ===============================
+;============================================================
+defmethod print (o:OutputStream, c:Const) :
+   match(c) :
+      (c:IntConst) : print{o, _} $ "Int(%~)" % [value(c)]
+      (c:NullConst) : print{o, _} $ "Null"
+      (c:StringConst) : print{o, _} $ "String(%~)" % [value(c)]
+      (c:SlotConst) : print{o, _} $ "Slot(#%~)" % [name(c)]
+      (c:ClassConst) :
+         val xs = for x in slots(c) seq : "#%~" % [x]
+         print{o, _} $ "Class(%,)" % [xs]
+      (c:MethodConst) :
+         val io = IndentedStream(o)
+         print(o, "Method(#%~, nargs:%~, nlocals:%~) :" % [name(c), nargs(c), nlocals(c)])
+         for i in code(c) do :
+            print(io, "\n%~" % [i])
+
+defmethod print (o:OutputStream, i:Ins) :
+   print{o, _} $ match(i) :
+      (i:LabelIns) : "label #%~" % [name(i)]
+      (i:LitIns) : "   lit #%~" % [idx(i)]
+      (i:PrintfIns) : "   printf #%~ %~" % [format(i), arity(i)]
+      (i:ArrayIns) : "   array"
+      (i:ObjectIns) : "   object #%~" % [class(i)]
+      (i:SlotIns) : "   slot #%~" % [name(i)]
+      (i:SetSlotIns) : "   set-slot #%~" % [name(i)]
+      (i:CallSlotIns) : "   call-slot #%~ %~" % [name(i), arity(i)]
+      (i:CallIns) : "   call #%~ %~" % [name(i), arity(i)]
+      (i:SetLocalIns) : "   set local %~" % [idx(i)]
+      (i:GetLocalIns) : "   get local %~" % [idx(i)]
+      (i:SetGlobalIns) : "   set global #%~" % [name(i)]
+      (i:GetGlobalIns) : "   get global #%~" % [name(i)]
+      (i:BranchIns) : "   branch #%~" % [name(i)]
+      (i:GotoIns) : "   goto #%~" % [name(i)]
+      (i:ReturnIns) : "   return"
+      (i:DropIns) : "   drop"
+
+defmethod print (o:OutputStream, p:Program) :
+   val io = IndentedStream(o)
+   print(o, "Constants :")
+   for (c in consts(p), i in 0 to false) do :
+      match(c) :
+         (c:MethodConst) :
+            print(io, "\n#%~ :" % [i])
+            print(IndentedStream(io), "\n%~" % [c])
+         (c) :
+            print(io, "\n#%~ : %~" % [i, c])
+   print(o, "\nGlobals :")
+   for s in slots(p) do :
+      print(io, "\n#%~" % [s])
+   print(o, "\nEntry : #%~" % [entry(p)])

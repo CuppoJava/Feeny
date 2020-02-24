@@ -1,0 +1,304 @@
+defpackage feeny/eval :
+   import core
+   import collections
+   import feeny/ir
+
+;============================================================
+;====================== Driver ==============================
+;============================================================
+public defn eval (e:ScopeStmt) -> False :
+   try :
+      val genv = Env(Null())
+      eval(genv, genv, e)
+   catch (e:EvalException) :
+      println("ERROR: %~" % [e])
+   false
+
+;============================================================
+;================== Evaluation Exception ====================
+;============================================================
+
+public deftype EvalException <: Exception
+defn EvalException (msg) :
+   new EvalException :
+      defmethod print (o:OutputStream, this) :
+         print(o, msg)
+
+;============================================================
+;================= Environment Structures ===================
+;============================================================
+
+defstruct Null
+
+defstruct Env :
+   entries: HashTable<Symbol, EnvValue> with: (init => HashTable<Symbol,EnvValue>())
+   parent: Env|Null
+
+deftype EnvValue
+defstruct VarValue <: EnvValue :
+   value: Int|Array|Env|Null
+defstruct CodeValue <: EnvValue :
+   args: List<Symbol>
+   body: ScopeStmt
+
+defn add (e:Env, n:Symbol, v:EnvValue) :
+   if key?(entries(e), n) :
+      throw $ EvalException("Variable %~ already defined in environment." % [n])
+   else :
+      entries(e)[n] = v
+   
+defn get (e:Env, n:Symbol) :
+   if key?(entries(e), n) :
+      entries(e)[n]
+   else if parent(e) is-not Null :
+      (parent(e) as Env)[n]
+   else :
+      throw $ EvalException("Could not resolve variable %~ in environment." % [n])
+
+defn set (e:Env, n:Symbol, v:EnvValue) : 
+   if key?(entries(e), n) :
+      entries(e)[n] = v
+   else if parent(e) is-not Null :
+      (parent(e) as Env)[n] = v
+   else :
+      throw $ EvalException("Could not resolve variable %~ in environment." % [n])
+
+defmethod print (o:OutputStream, e:Env) :
+   print(o, "[OBJECT]")
+
+defmethod print (o:OutputStream, e:Null) :
+   print(o, "Null")
+
+;============================================================
+;===================== Evaluator ============================
+;============================================================
+
+defn eval (genv:Env, env:Env, e:Exp) -> Int|Array|Env|Null :
+   match(e) :
+      (e:IntExp) :
+         value(e)
+      (e:NullExp) :
+         Null()
+      (e:PrintfExp) :
+         val exps* = for e in exps(e) map : eval(genv, env, e)
+         pprint(format(e), exps*)
+         Null()
+      (e:ArrayExp) :
+         val len* = fint(eval(genv, env, length(e)))
+         val init* = eval(genv, env, init(e))
+         Array<?>(len*, init*)
+      (e:ObjectExp) :      
+         val obj = match(eval(genv, env, parent(e))) :
+            (v:Env|Null) : Env(v)
+            (v:Int) : throw $ EvalException("Cannot extend base object of type int.")
+            (v:Array) : throw $ EvalException("Cannot extend base object of type array.")
+         for s in slots(e) do :
+            match(s) :
+               (s:SlotVar) :
+                  val v = eval(genv, env, exp(s))
+                  add(obj, name(s), VarValue(v))
+               (s:SlotMethod) :
+                  add(obj, name(s), CodeValue(args(s), body(s)))
+         obj
+      (e:SlotExp) :
+         val obj = eval(genv, env, exp(e))
+         get-slot(obj, name(e))
+      (e:SetSlotExp) :      
+         val obj = eval(genv, env, exp(e))
+         val value = eval(genv, env, value(e))
+         set-slot(obj, name(e), value)
+         value
+      (e:CallSlotExp) :
+         val obj = eval(genv, env, exp(e))
+         val args* = for a in args(e) map : eval(genv, env, a)
+         call-slot(genv, obj, name(e), args*)
+      (e:CallExp) :
+         val argvs = for a in args(e) map : eval(genv, env, a)
+         match(genv[name(e)]) :
+            (v:VarValue) :
+               throw $ EvalException("Variable %~ cannot be called as function." % [name(e)])
+            (v:CodeValue) :
+               if length(argvs) != length(args(v)) :
+                  throw $ EvalException("Incorrect number of arguments to function %~." % [name(e)])
+               val env* = Env(genv)
+               for (a in args(v), ea in argvs) do :
+                  add(env*, a, VarValue(ea))
+               eval(genv, env*, body(v))
+      (e:SetExp) :
+         val exp* = eval(genv, env, exp(e))
+         match(env[name(e)]) :
+            (v:VarValue) :
+               env[name(e)] = VarValue(exp*)
+               exp*
+            (v:CodeValue) :
+               throw $ EvalException("Cannot assign to function %~." % [name(e)])
+      (e:IfExp) :
+         val p = fbool(eval(genv, env, pred(e)))
+         eval{genv, Env(env), _} $
+            if p : conseq(e)
+            else : alt(e)
+      (e:WhileExp) :
+         while fbool(eval(genv, env, pred(e))) :
+            eval(genv, Env(env), body(e))
+         Null()
+      (e:RefExp) :
+         match(env[name(e)]) :
+            (v:VarValue) :
+               value(v)
+            (v:CodeValue) :
+               throw $ EvalException("Cannot directly refer to function %~." % [name(e)])
+
+defn* eval (genv:Env, env:Env, e:ScopeStmt) -> Int|Array|Env|Null :
+   match(e) :
+      (e:ScopeVar) :
+         val v = eval(genv, env, exp(e))
+         add(env, name(e), VarValue(v))
+         Null()
+      (e:ScopeFn) :
+         add(env, name(e), CodeValue(args(e), body(e)))
+         Null()
+      (e:ScopeExp) :
+         eval(genv, env, exp(e))
+      (e:ScopeSeq) :
+         eval(genv, env, a(e))
+         eval(genv, env, b(e))
+      (e) :
+         fatal("Not supported: %~" % [e])
+         
+defn fbool (v) :
+   match(v) :
+      (v:Null) : false
+      (v) : true
+
+defn fint (v) :
+   match(v) :
+      (v:Int) : v
+      (v:Array) : throw $ EvalException("Expected an int value but received an array.")
+      (v:Env) : throw $ EvalException("Expected an int value but received an object.")
+      (v:Null) : throw $ EvalException("Expected an int value but received null.")
+
+;=== Pretty Printing ===
+defn pprint (format:String, args:Seqable) :
+   val arg-seq = to-seq(args)
+   val n = length(format)
+   let loop (i:Int = 0) :
+      if i < n :
+         switch(format[i]) :
+            '~' :
+               if empty?(arg-seq) :
+                  throw $ EvalException $
+                  "Format string %~ is expecting more arguments." % [format]
+               print(next(arg-seq))
+               loop(i + 1)
+            else :
+               print(format[i])
+               loop(i + 1)
+      else :
+         if not empty?(arg-seq) :
+            throw $ EvalException $
+            "Unexpected end of format string %~. More arguments remaining." % [format]
+
+;=== Method Interface ===
+defmulti set-slot (o:Int|Array|Env|Null, name:Symbol, value:Int|Array|Env|Null) -> False
+defmulti get-slot (o:Int|Array|Env|Null, name:Symbol) -> Int|Array|Env|Null
+defmulti call-slot (genv:Env, o:Int|Array|Env|Null, name:Symbol, args:List<Int|Array|Env|Null>) -> Int|Array|Env|Null
+
+;=== Integer Methods ===
+defmethod get-slot (o:Int, name:Symbol) :
+   throw $ EvalException("No variable slot named %~ in integer %~." % [name, o])
+
+defmethod get-slot (o:Int, name:Symbol) :
+   throw $ EvalException("Cannot assign slot named %~ in integer %~." % [name, o])
+
+defmethod call-slot (genv:Env, x:Int, name:Symbol, args:List<Int|Array|Env|Null>) :
+   defn to-fbool (b:True|False) :
+      0 when b else Null()
+   if length(args) != 1 :
+      throw $ EvalException("Integer method requires single integer argument.")
+   if head(args) is-not Int :
+      throw $ EvalException("Integer method requires single integer argument.")
+   val y = head(args) as Int   
+   switch(name) :
+      `eq : to-fbool(x == y)
+      `lt : to-fbool(x < y)
+      `le : to-fbool(x <= y)
+      `gt : to-fbool(x > y)
+      `ge : to-fbool(x >= y)
+      `add : x + y
+      `sub : x - y
+      `mul : x * y
+      `div : x / y
+      `mod : x % y
+      else : throw $ EvalException("No method %~ for integer." % [name])
+
+;=== Array Methods === 
+defmethod get-slot (o:Array, name:Symbol) :
+   throw $ EvalException("No variable slot named %~ in array." % [name, o])
+
+defmethod get-slot (o:Array, name:Symbol) :
+   throw $ EvalException("Cannot assign slot named %~ in array." % [name, o])
+
+defmethod call-slot (genv:Env, a:Array, name:Symbol, args:List<Int|Array|Env|Null>) :
+   defn ensure-nargs (n:Int) :
+      if length(args) != n :
+         throw $ EvalException("Array method %~ requires %~ arguments." % [name, n])
+   defn ensure-index-arg (i:Int) :
+      if args[i] is-not Int :
+         throw $ EvalException("Array method %~ requires argument %~ to be an integer." % [name, i])
+      val x = args[i] as Int
+      if x < 0 or x >= length(a) :
+         throw $ EvalException("Index %~ out of bounds for array method %~." % [x, name])
+         
+   switch(name) :
+      `get :
+         ensure-nargs(1)
+         ensure-index-arg(0)
+         a[args[0] as Int]
+      `set :
+         ensure-nargs(2)
+         ensure-index-arg(0)
+         a[args[0] as Int] = args[1]
+         Null()
+      `length :
+         ensure-nargs(0)
+         length(a)
+      else :
+         throw $ EvalException("No method %~ for array." % [name])
+
+;=== Null Methods ===
+defmethod get-slot (n:Null, name:Symbol) :
+   throw $ EvalException("No slot %~ for null." % [name])
+
+defmethod set-slot (n:Null, name:Symbol, v:Int|Array|Env|Null) :
+   throw $ EvalException("No slot %~ for null." % [name])
+
+defmethod call-slot (genv:Env, n:Null, name:Symbol, args:List<Int|Array|Env|Null>) :
+   throw $ EvalException("No method %~ for null." % [name])
+   
+;=== Object Methods ===
+defmethod get-slot (o:Env, name:Symbol) :
+   match(o[name]) :
+      (v:VarValue) :
+         value(v)
+      (v:CodeValue) :
+         throw $ EvalException("Cannot directly access method slot %~." % [name])
+
+defmethod set-slot (o:Env, name:Symbol, v:Int|Array|Env|Null) :
+   match(o[name]) :
+      (e:VarValue) :
+         o[name] = VarValue(v)         
+      (e:CodeValue) :
+         throw $ EvalException("Cannot assign to method slot %~ in object." % [name])   
+
+defmethod call-slot (genv:Env, o:Env, name:Symbol, argvs:List<Int|Array|Env|Null>) :
+   match(o[name]) :
+      (v:VarValue) :
+         throw $ EvalException("Variable slot %~ in object cannot be called as method." % [name])
+      (v:CodeValue) :
+         if length(args(v)) != length(argvs) :
+            throw $ EvalException("Incorrect number of arguments to method %~ for object." % [name])
+         val env* = Env(genv)
+         add(env*, `this, VarValue(o))
+         for (a in args(v), ea in argvs) do :
+            add(env*, a, VarValue(ea))
+         eval(genv, env*, body(v))

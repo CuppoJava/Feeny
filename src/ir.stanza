@@ -1,0 +1,396 @@
+defpackage feeny/ir :
+   import core
+   import collections
+
+;============================================================
+;=================== IR Definition ==========================
+;============================================================
+
+public deftype Exp
+public defstruct IntExp <: Exp : (value:Int)
+public defstruct NullExp <: Exp
+public defstruct PrintfExp <: Exp : (format:String, exps:List<Exp>)
+public defstruct ArrayExp <: Exp : (length:Exp, init:Exp)
+public defstruct ObjectExp <: Exp : (parent:Exp, slots:List<SlotStmt>)
+public defstruct SlotExp <: Exp : (name:Symbol, exp:Exp)
+public defstruct SetSlotExp <: Exp : (name:Symbol, exp:Exp, value:Exp)
+public defstruct CallSlotExp <: Exp : (name:Symbol, exp:Exp, args:List<Exp>)
+public defstruct CallExp <: Exp : (name:Symbol, args:List<Exp>)
+public defstruct SetExp <: Exp : (name:Symbol, exp:Exp)
+public defstruct IfExp <: Exp : (pred:Exp, conseq:ScopeStmt, alt:ScopeStmt)
+public defstruct WhileExp <: Exp : (pred:Exp, body:ScopeStmt)
+public defstruct RefExp <: Exp : (name:Symbol)
+
+public deftype SlotStmt
+public defstruct SlotVar <: SlotStmt : (name:Symbol, exp:Exp)
+public defstruct SlotMethod <: SlotStmt : (name:Symbol, args:List<Symbol>, body:ScopeStmt)
+
+public deftype ScopeStmt
+public defstruct ScopeVar <: ScopeStmt : (name:Symbol, exp:Exp)
+public defstruct ScopeFn <: ScopeStmt : (name:Symbol, args:List<Symbol>, body:ScopeStmt)
+public defstruct ScopeBegin <: ScopeStmt : (stmts:List<ScopeStmt>)
+public defstruct ScopeSeq <: ScopeStmt : (a:ScopeStmt, b:ScopeStmt)
+public defstruct ScopeExp <: ScopeStmt : (exp:Exp)
+
+;============================================================
+;=================== IR Printer =============================
+;============================================================
+
+defn written (x) : "%~" % [x]
+
+defmethod print (o:OutputStream, e:Exp) :
+   print{o, _} $ match(e) :
+      (e:IntExp) : value(e)
+      (e:NullExp) : "null"
+      (e:PrintfExp) : "printf(%,)" % [cons(written(format(e)), exps(e))]
+      (e:ArrayExp) : "array(%~, %~)" % [length(e), init(e)]
+      (e:ObjectExp) : "object(%_) : (%,)" % [parent(e), slots(e)]
+      (e:SlotExp) : "%~.%~" % [exp(e), name(e)]
+      (e:SetSlotExp) : "%~.%~ = %~" % [exp(e), name(e), value(e)]
+      (e:CallSlotExp) : "%~.%~(%,)" % [exp(e), name(e), args(e)]
+      (e:CallExp) : "%~(%,)" % [name(e), args(e)]
+      (e:SetExp) : "%~ = %~" % [name(e), exp(e)]
+      (e:IfExp) : "if %~ : %~ else : %~" % [pred(e), conseq(e), alt(e)]
+      (e:WhileExp) : "while %~ : %~" % [pred(e), body(e)]
+      (e:RefExp) : name(e)
+
+defmethod print (o:OutputStream, e:SlotStmt) :
+   print{o, _} $ match(e) :
+      (e:SlotVar) : "var %~ = %~" % [name(e), exp(e)]
+      (e:SlotMethod) : "method %~ (%,) : %~" % [name(e), args(e), body(e)]
+
+defmethod print (o:OutputStream, e:ScopeStmt) :
+   print{o, _} $ match(e) :
+      (e:ScopeVar) : "var %~ = %~" % [name(e), exp(e)]
+      (e:ScopeFn) : "defn %~ (%,) : %~" % [name(e), args(e), body(e)]
+      (e:ScopeExp) : exp(e)
+      (e:ScopeBegin) : "(%*)" % [join(stmts(e), " ")]
+      (e:ScopeSeq) : "%~ ; %~" % [a(e), b(e)]
+
+;============================================================
+;==================== Mappers ===============================
+;============================================================
+
+public defn map<?T> (f:Exp -> Exp, s:?T&ScopeStmt) -> T :
+   {_ as T&ScopeStmt} $ match(s) :
+      (s:ScopeVar) : ScopeVar(name(s), f(exp(s)))
+      (s:ScopeFn) : s
+      (s:ScopeBegin) : s
+      (s:ScopeSeq) : s
+      (s:ScopeExp) : ScopeExp(f(exp(s)))
+
+public defn map<?T> (f:ScopeStmt -> ScopeStmt, s:?T&ScopeStmt) -> T :
+   {_ as T&ScopeStmt} $ match(s) :
+      (s:ScopeVar) : s
+      (s:ScopeFn) : ScopeFn(name(s), args(s), f(body(s)))
+      (s:ScopeBegin) : ScopeBegin(map(f, stmts(s)))
+      (s:ScopeSeq) : ScopeSeq(f(a(s)), f(b(s)))
+      (s:ScopeExp) : s
+
+public defn map<?T> (f:Exp -> Exp, s:?T&SlotStmt) -> T :
+   {_ as T&SlotStmt} $ match(s) :
+      (s:SlotVar) : SlotVar(name(s), f(exp(s)))
+      (s:SlotMethod) : s
+
+public defn map<?T> (f:ScopeStmt -> ScopeStmt, s:?T&SlotStmt) -> T :
+   {_ as T&SlotStmt} $ match(s) :
+      (s:SlotVar) : s
+      (s:SlotMethod) : SlotMethod(name(s), args(s), f(body(s)))
+
+public defn map<?T> (f:Exp -> Exp, e:?T&Exp) -> T :
+   {_ as T&Exp} $ match(e) :
+      (e:IntExp) : e
+      (e:NullExp) : e
+      (e:PrintfExp) : PrintfExp(format(e), map(f,exps(e)))
+      (e:ArrayExp) : ArrayExp(f(length(e)), f(init(e)))
+      (e:ObjectExp) : ObjectExp(f(parent(e)), slots(e))
+      (e:SlotExp) : SlotExp(name(e), f(exp(e)))
+      (e:SetSlotExp) : SetSlotExp(name(e), f(exp(e)), f(value(e)))
+      (e:CallSlotExp) : CallSlotExp(name(e), f(exp(e)), map(f,args(e)))
+      (e:CallExp) : CallExp(name(e), map(f,args(e)))
+      (e:SetExp) : SetExp(name(e), f(exp(e)))
+      (e:IfExp) : IfExp(f(pred(e)), conseq(e), alt(e))
+      (e:WhileExp) : WhileExp(f(pred(e)), body(e))
+      (e:RefExp) : e
+
+public defn map<?T> (f:ScopeStmt -> ScopeStmt, e:?T&Exp) -> T :
+   {_ as T&Exp} $ match(e) :
+      (e:IntExp) : e
+      (e:NullExp) : e
+      (e:PrintfExp) : e
+      (e:ArrayExp) : e
+      (e:ObjectExp) : e
+      (e:SlotExp) : e
+      (e:SetSlotExp) : e
+      (e:CallSlotExp) : e
+      (e:CallExp) : e
+      (e:SetExp) : e
+      (e:IfExp) : IfExp(pred(e), f(conseq(e)), f(alt(e)))
+      (e:WhileExp) : WhileExp(pred(e), f(body(e)))
+      (e:RefExp) : e
+
+public defn map<?T> (f:SlotStmt -> SlotStmt, e:?T&Exp) -> T :
+   {_ as T&Exp} $ match(e) :
+      (e:IntExp) : e
+      (e:NullExp) : e
+      (e:PrintfExp) : e
+      (e:ArrayExp) : e
+      (e:ObjectExp) : ObjectExp(parent(e), map(f,slots(e)))
+      (e:SlotExp) : e
+      (e:SetSlotExp) : e
+      (e:CallSlotExp) : e
+      (e:CallExp) : e
+      (e:SetExp) : e
+      (e:IfExp) : e
+      (e:WhileExp) : e
+      (e:RefExp) : e
+
+;============================================================
+;================ Recursive Mappers =========================
+;============================================================
+
+public defn mapr<?T> (f:ScopeStmt -> ScopeStmt, l:?T&SlotStmt) -> T :
+   defn fe (e:Exp) : mapr(f, e)
+   map(f, map(fe, l))
+
+public defn mapr<?T> (f:ScopeStmt -> ScopeStmt, s:?T&Exp) -> T :
+   defn fe (e:Exp) : mapr(f, e)
+   defn fl (l:SlotStmt) : mapr(f, l)
+   map(f, map(fl, map(fe, s)))
+
+public defn mapr<?T> (f:ScopeStmt -> ScopeStmt, s:?T&ScopeStmt) -> T :
+   defn fe (e:Exp) : mapr(f, e)
+   map(f, map(fe, s)) as T&ScopeStmt
+
+public defn mapr<?T> (f:Exp -> Exp, s:?T&ScopeStmt) -> T :
+   defn fs (s:ScopeStmt) : mapr(f, s)
+   map(f, map(fs, s)) as T&ScopeStmt
+
+;============================================================
+;================ Serialization =============================
+;============================================================
+
+;Expression Tags
+val tag-counter = to-seq(0 to false)
+val INT-TAG = next(tag-counter)
+val NULL-TAG = next(tag-counter)
+val PRINTF-TAG = next(tag-counter)
+val ARRAY-TAG = next(tag-counter)
+val OBJECT-TAG = next(tag-counter)
+val SLOT-TAG = next(tag-counter)
+val SET-SLOT-TAG = next(tag-counter)
+val CALL-SLOT-TAG = next(tag-counter)
+val CALL-TAG = next(tag-counter)
+val SET-TAG = next(tag-counter)
+val IF-TAG = next(tag-counter)
+val WHILE-TAG = next(tag-counter)
+val REF-TAG = next(tag-counter)
+;Statement Tags
+val SCOPE-VAR-TAG = next(tag-counter)
+val SCOPE-FN-TAG = next(tag-counter)
+val SCOPE-SEQ-TAG = next(tag-counter)
+val SCOPE-EXP-TAG = next(tag-counter)
+
+public defn save-ast (p:ScopeStmt, filename:String) :
+   val file = FileOutputStream(filename)
+   try :
+      serialize(file, p)
+   finally :
+      close(file)
+
+defn serialize (o:FileOutputStream, program:ScopeStmt) :
+   ;Tags
+   defn tag (e:Exp) :
+      match(e) :
+         (e:IntExp) : INT-TAG
+         (e:NullExp) : NULL-TAG
+         (e:PrintfExp) : PRINTF-TAG
+         (e:ArrayExp) : ARRAY-TAG
+         (e:ObjectExp) : OBJECT-TAG
+         (e:SlotExp) : SLOT-TAG
+         (e:SetSlotExp) : SET-SLOT-TAG
+         (e:CallSlotExp) : CALL-SLOT-TAG
+         (e:CallExp) : CALL-TAG
+         (e:SetExp) : SET-TAG
+         (e:IfExp) : IF-TAG
+         (e:WhileExp) : WHILE-TAG
+         (e:RefExp) : REF-TAG
+   defn tag (s:SlotStmt) :
+      match(s) :
+         (s:SlotVar) : SCOPE-VAR-TAG
+         (s:SlotMethod) : SCOPE-FN-TAG
+   defn tag (s:ScopeStmt) :
+      match(s) :
+         (s:ScopeVar) : SCOPE-VAR-TAG
+         (s:ScopeFn) : SCOPE-FN-TAG
+         (s:ScopeSeq) : SCOPE-SEQ-TAG
+         (s:ScopeExp) : SCOPE-EXP-TAG
+         
+   ;Low Level
+   defn emit (x:Byte|Char|Int) :
+      put(o, x)
+   defn emit (s:String) :
+      emit(length(s))
+      do(emit, s)
+   defn emit (s:Symbol) :
+      emit(to-string(s))
+   defn emit (ss:List) :
+      emit(length(ss))
+      do(emit, ss)
+
+   ;High Level
+   defn emit (s:ScopeStmt) :
+      emit(tag(s))
+      match(s) :
+         (s:ScopeVar) :
+            emit(name(s))
+            emit(exp(s))
+         (s:ScopeFn) :
+            emit(name(s))
+            emit(args(s))
+            emit(body(s))
+         (s:ScopeSeq) :
+            emit(a(s))
+            emit(b(s))
+         (s:ScopeExp) :
+            emit(exp(s))
+         (s) :
+            fatal("Cannot serialize scope statement: %~." % [s])
+   defn emit (s:SlotStmt) :
+      emit(tag(s))
+      match(s) :
+         (s:SlotVar) :
+            emit(name(s))
+            emit(exp(s))
+         (s:SlotMethod) :
+            emit(name(s))
+            emit(args(s))
+            emit(body(s))
+   defn emit (e:Exp) :
+      emit(tag(e))
+      match(e) :
+         (e:IntExp) :
+            emit(value(e))
+         (e:NullExp) :
+            false
+         (e:PrintfExp) :
+            emit(format(e))
+            emit(exps(e))
+         (e:ArrayExp) :
+            emit(length(e))
+            emit(init(e))
+         (e:ObjectExp) :
+            emit(parent(e))
+            emit(slots(e))
+         (e:SlotExp) :
+            emit(name(e))
+            emit(exp(e))
+         (e:SetSlotExp) :
+            emit(name(e))
+            emit(exp(e))
+            emit(value(e))
+         (e:CallSlotExp) :
+            emit(name(e))
+            emit(exp(e))
+            emit(args(e))
+         (e:CallExp) :
+            emit(name(e))
+            emit(args(e))
+         (e:SetExp) :
+            emit(name(e))
+            emit(exp(e))
+         (e:IfExp) :
+            emit(pred(e))
+            emit(conseq(e))
+            emit(alt(e))
+         (e:WhileExp) :
+            emit(pred(e))
+            emit(body(e))
+         (e:RefExp) :
+            emit(name(e))
+
+   ;Driver
+   emit(program)
+
+
+;============================================================
+;=================== Deserialization ========================
+;============================================================
+
+public defn load-ast (filename:String) :
+   val f = FileInputStream(filename)
+   try :
+      read-ast(f)
+   finally :
+      close(f)
+
+defn read-ast (f:FileInputStream) :
+   ;Errors
+   defn read-error (x) :
+      throw $ new Exception :
+         defmethod print (o:OutputStream, this) :
+            print(o, x)
+
+   ;Low Level
+   defn read-byte () :
+      match(get-byte(f)) :
+         (i:Byte) : i
+         (f:False) : read-error("Unexpected end of file.")
+   defn read-char () :
+      match(get-char(f)) :
+         (i:Char) : i
+         (f:False) : read-error("Unexpected end of file.")
+   defn read-int () :
+      match(get-int(f)) :
+         (i:Int) : i
+         (f:False) : read-error("Unexpected end of file.")
+   defn read-string () :
+      val l = read-int()
+      String(seq(read-char{}, 0 to l))
+   defn read-symbol () :
+      to-symbol(read-string())
+
+   ;Lists
+   defn read-list<?T> (f: () -> ?T) :
+      val n = read-int()
+      to-list $ seq(f{}, 0 to n)      
+   defn read-symbols () : read-list(read-symbol)
+   defn read-exps () : read-list(read-exp)      
+
+   ;High Level
+   defn read-slot () :
+      val tag = read-int()
+      switch(tag) :
+         SCOPE-VAR-TAG : SlotVar(read-symbol(), read-exp())
+         SCOPE-FN-TAG : SlotMethod(read-symbol(), read-symbols(), read-stmt())
+         else : read-error("Unrecognized tag for slot statement: %~" % [tag])
+
+   defn read-stmt () :
+      val tag = read-int()
+      switch(tag) :
+         SCOPE-VAR-TAG : ScopeVar(read-symbol(), read-exp())
+         SCOPE-FN-TAG : ScopeFn(read-symbol(), read-symbols(), read-stmt())
+         SCOPE-SEQ-TAG : ScopeSeq(read-stmt(), read-stmt())
+         SCOPE-EXP-TAG : ScopeExp(read-exp())
+         else : read-error("Unrecognized tag for scope statement: %~" % [tag])
+
+   defn read-exp () :
+      val tag = read-int()
+      switch(tag) :
+         INT-TAG : IntExp(read-int())
+         NULL-TAG : NullExp()
+         PRINTF-TAG : PrintfExp(read-string(), read-exps())
+         ARRAY-TAG : ArrayExp(read-exp(), read-exp())
+         OBJECT-TAG : ObjectExp(read-exp(), read-list(read-slot))
+         SLOT-TAG : SlotExp(read-symbol(), read-exp())
+         SET-SLOT-TAG : SetSlotExp(read-symbol(), read-exp(), read-exp())
+         CALL-SLOT-TAG : CallSlotExp(read-symbol(), read-exp(), read-exps())
+         CALL-TAG : CallExp(read-symbol(), read-exps())
+         SET-TAG : SetExp(read-symbol(), read-exp())
+         IF-TAG : IfExp(read-exp(), read-stmt(), read-stmt())
+         WHILE-TAG : WhileExp(read-exp(), read-stmt())
+         REF-TAG : RefExp(read-symbol())
+         else : read-error("Unrecognized tag for expression: %~" % [tag])
+
+   ;Driver
+   read-stmt()
